@@ -34,7 +34,6 @@ create table if not exists discovery_feedback (
     linkedin     text,
     feedback     text
 );
-
 -- One row per topic per day: what each discovery run saw of a story (agent/discovery/trends.py reads these to say
 -- whether a topic is new, rising or popular). First sighting of the day wins; a re-run the same day adds nothing.
 --   origins: the independent sources that carried it (affiliated accounts and reposts already folded together)
