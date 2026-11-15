@@ -73,13 +73,13 @@ The web app calls these (`PIPELINE_URL` and `TRIGGER_SECRET` in `app/.env.local`
    Telegram webhook with it, so the local `python -m agent.telegram_discovery` poller then refuses to start (no second writer).
 3. Check: `https://<service>.onrender.com/` answers `{"ok":true}`.
 4. Web app: `PIPELINE_URL=https://<service>.onrender.com` and the same `TRIGGER_SECRET`.
-5. Hostinger cron (hPanel > Advanced > Cron Jobs, server time UTC), twice a day, 12 hours apart (06:00 and 18:00 IST):
-   `30 0,12 * * *`
+5. Hostinger cron (hPanel > Advanced > Cron Jobs, server time UTC), two jobs, runs 12 hours apart (06:00 and 18:00 IST):
    ```
-   curl -s -m 90 -o /dev/null https://<service>.onrender.com/ ; curl -fsS -m 60 -o /dev/null -X POST -H "X-Trigger-Secret: <TRIGGER_SECRET>" https://<service>.onrender.com/discover
+   25 0,12 * * *   curl -fsS --max-time 90 -o /dev/null "https://<service>.onrender.com/"
+   30 0,12 * * *   curl -fsS --max-time 90 -o /dev/null -X POST -H "X-Trigger-Secret: <TRIGGER_SECRET>" "https://<service>.onrender.com/discover"
    ```
-   The first call wakes the free instance (it sleeps after 15 idle minutes); the second starts a run. Results and failures are
-   sent to Telegram, and land in the app.
+   The first wakes the free instance (it sleeps after 15 idle minutes); the second starts a run. Keep them separate: Hostinger's
+   API firewall rejects a command chained with `;`. Results and failures are sent to Telegram, and land in the app.
 
 Free-plan limits: the disk is wiped on every restart, so Supabase must work (local fallback files do not survive). Agent Reach
 (X, YouTube, web search) is not installed on Render: those sources show as one `agent-reach: NOT_INSTALLED` line per run.
