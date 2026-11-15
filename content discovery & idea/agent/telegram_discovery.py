@@ -2,8 +2,7 @@
 
 This file is the only place that knows about Telegram. It turns a command into a call on agent/discovery/service.py and the
 answer into messages; discovery, ranking and trend logic never import it. It reuses the project's existing Telegram plumbing:
-the same bot (TELEGRAM_BOT) and owner chat (TELEGRAM_CHAT_ID), the owner check in agent/nodes/approval.py, the webhook route and
-secret in main.py, and the HTML helpers in agent/digest.py.
+the same bot (TELEGRAM_BOT) and owner chat (TELEGRAM_CHAT_ID), the owner check and webhook helpers below, the webhook route in main.py, and the HTML helpers in agent/digest.py.
 
     /discover [n]    run the pipeline in the background (3-4 min); the top n ideas (default 10) arrive when it finishes
     /trending        what is new, rising or popular, with the evidence for each
@@ -22,6 +21,8 @@ Local use (no public URL needed):
     .venv\\Scripts\\python -m agent.telegram_discovery             # poll for commands until Ctrl+C
 """
 
+import hashlib
+import hmac
 import html
 import os
 import re
@@ -35,10 +36,47 @@ from dotenv import load_dotenv
 
 from agent import digest
 from agent.discovery import jobs, service
-from agent.nodes import approval
 from agent.paths import ENV_FILE
 
 load_dotenv(ENV_FILE, override=True)
+
+MIN_SECRET = 32  # characters; python -c "import secrets; print(secrets.token_hex(32))" gives 64
+
+
+def trigger_secret():
+    """TRIGGER_SECRET if it is long enough to resist guessing, else None. None means every guarded route stays closed."""
+    s = os.getenv("TRIGGER_SECRET") or ""
+    return s if len(s) >= MIN_SECRET else None
+
+
+def secret_ok(given):
+    s = trigger_secret()
+    return bool(s) and hmac.compare_digest((given or "").encode(), s.encode())
+
+
+def _from_owner(update, chat_id):
+    """A bot is reachable by every Telegram user: only the configured chat gets to drive it."""
+    msg = update.get("message") or (update.get("callback_query") or {}).get("message") or {}
+    return str((msg.get("chat") or {}).get("id")) == str(chat_id)
+
+
+def webhook_secret():
+    """What Telegram echoes back on every webhook call. Hashed: Telegram allows only [A-Za-z0-9_-]."""
+    s = trigger_secret()
+    return hashlib.sha256(s.encode()).hexdigest() if s else None
+
+
+def webhook_authorized(header):
+    s = webhook_secret()
+    return bool(s) and hmac.compare_digest((header or "").encode(), s.encode())
+
+
+def ensure_webhook():
+    """Register the webhook at boot, only on a public deployment (RENDER_EXTERNAL_URL) and only with a usable secret."""
+    token, base, secret = os.getenv("TELEGRAM_BOT"), os.getenv("RENDER_EXTERNAL_URL"), webhook_secret()
+    if token and base and secret:
+        httpx.post(f"https://api.telegram.org/bot{token}/setWebhook", json={"url": f"{base.rstrip('/')}/telegram-webhook", "secret_token": secret})
+
 
 COMMANDS = ("discover", "trending", "ideas", "brief")
 LIMIT = digest.LIMIT  # Telegram's cap on visible text per message
@@ -337,10 +375,19 @@ def _discover_done(api, chat_id, job):
     for key in ("seen_message", "trend_message"):
         if "LOCAL FALLBACK" in r.get(key, "") or "FAILED" in r.get(key, ""):
             notes.append("⚠ " + esc(clip(r[key], 200)))
+    if not r.get("complete", True):
+        notes.append(f"⚠ {len(r.get('failed_sources') or {})} source queries failed; some stories may be missing (see Sources in the app)")
     if r.get("saved_where") != "supabase":
         notes.append(f"⚠ ideas were saved {'only on this machine' if r.get('saved_where') == 'local' else 'NOWHERE'}; /ideas may not survive a restart")
     text, rows = render_view("run", 1)
     send(api, chat_id, "\n".join(notes) + "\n\n" + text, rows)
+
+
+def notify_discover(job):
+    """Report a run that was not started from the chat (the scheduled one): results on success, the reason on failure."""
+    api, chat_id = _config()
+    if api:
+        _discover_done(api, chat_id, job)
 
 
 def cmd_discover(api, chat_id, arg):
@@ -417,12 +464,12 @@ def _is_ours(update):
 
 def handle_update(update, api=None):
     """Handle one Telegram update if it is a discovery command or button → True (consumed). False means "not mine": the caller
-    passes it on (main.py gives it to approval.handle_idle_update). Updates from any chat but the owner's are consumed and ignored."""
+    passes it on (main.py answers it with nothing). Updates from any chat but the owner's are consumed and ignored."""
     if not isinstance(update, dict) or not _is_ours(update):
         return False
     real_api, chat_id = _config()
     api = api or real_api
-    if api is None or not chat_id or not approval._from_owner(update, chat_id):
+    if api is None or not chat_id or not _from_owner(update, chat_id):
         return True  # not configured, or not the owner: ours to ignore, nobody else's to answer
     try:
         cq = update.get("callback_query")
@@ -477,7 +524,7 @@ def run_polling(api=None, once=False, timeout=25):
         while True:
             for update in _updates(api, offset, timeout):
                 offset = update["update_id"] + 1
-                if not handle_update(update, api) and approval._from_owner(update, chat_id) and (update.get("message") or {}).get("text"):
+                if not handle_update(update, api) and _from_owner(update, chat_id) and (update.get("message") or {}).get("text"):
                     send(api, chat_id, HELP)  # anything else typed to the bot in local mode
             if once:
                 return 0

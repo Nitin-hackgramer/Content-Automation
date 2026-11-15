@@ -226,6 +226,23 @@ def _assemble(c, h, l):
             "claim_check": claim_check}
 
 
+MAX_PER_SOURCE = 3  # ideas from one lone source (e.g. GitHub changelog) allowed in the shown list
+
+
+def diversify(ranked, top, per_source=MAX_PER_SOURCE):
+    """→ the top ideas, best first, with at most per_source from any one single-source origin. Skipped ones refill the end
+    when the pool runs short, so the list is never shorter than it could be."""
+    shown, skipped, count = [], [], {}
+    for idea in ranked:
+        key = tuple(idea.get("sources") or ()) if len(idea.get("sources") or ()) == 1 else None
+        if key and count.get(key, 0) >= per_source:
+            skipped.append(idea)
+            continue
+        count[key] = count.get(key, 0) + 1
+        shown.append(idea)
+    return (shown + skipped)[:top]
+
+
 def rank(candidates, now, api_key=None):
     """→ (ranked candidates, note). The note says what was skipped or failed, for the report."""
     scored = [(c, heuristic(c, now)) for c in candidates]

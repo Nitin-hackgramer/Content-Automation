@@ -3,3 +3,13 @@
 .venv/
 __pycache__/
 *.pyc
+
+# separate repo (Content-System)
+app/
+# local AI tool configs
+content discovery & idea/.agents/
+content discovery & idea/.claude/
+content discovery & idea/.codex/
+content discovery & idea/.hermes/
+content discovery & idea/.impeccable/
+content discovery & idea/skills-lock.json

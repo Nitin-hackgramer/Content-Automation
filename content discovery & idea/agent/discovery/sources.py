@@ -9,11 +9,11 @@ Every item is a plain dict (the common schema; missing values are None or {}, ne
 Agent Reach sources (X, YouTube, web search) live in reach.py and join through jobs().
 
 A source that fails (network error, HTTP 429, bad payload) is reported as "error:<reason>" and
-skipped. The other sources still run. Fetchers are new rather than reused from agent/nodes/research.py
-because those drop dates and engagement numbers and swallow errors without a trace.
+skipped. The other sources still run. Fetchers keep dates and engagement numbers and report errors instead of swallowing them.
 """
 
 import calendar
+import html
 import re
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -22,7 +22,12 @@ from datetime import datetime, timedelta, timezone
 import feedparser
 import httpx
 
-from agent.nodes.research import _clean
+
+
+def _clean(text, limit=300):
+    """Feed summaries come as HTML: strip tags/entities, collapse whitespace, cut to `limit`."""
+    text = html.unescape(re.sub(r"<[^>]+>", " ", text or ""))
+    return " ".join(text.split())[:limit]
 
 WINDOW_DAYS = 7
 TIMEOUT = 15
@@ -85,11 +90,17 @@ def _on_topic(text):
     return bool(TOPIC_RE.search(text or ""))
 
 
+def _title(text, limit=200):
+    """Whitespace collapsed; a long one (a tweet) is cut on a word with an ellipsis, never mid-word."""
+    t = " ".join((text or "").split())
+    return t if len(t) <= limit else t[:limit - 1].rsplit(" ", 1)[0].rstrip(" ,.;:-") + "…"
+
+
 def _item(title, url, source, summary="", published=None, metric=None, metric_name=None,
           author=None, platform=None, metrics=None):
     if metrics is None:
         metrics = {metric_name: metric} if metric is not None and metric_name else {}
-    return {"title": " ".join((title or "").split())[:200], "url": url, "source": source,
+    return {"title": _title(title), "url": url, "source": source,
             "platform": platform or source, "summary": _clean(summary or "", 300), "author": author,
             "published": published, "metric": metric, "metric_name": metric_name, "metrics": metrics}
 

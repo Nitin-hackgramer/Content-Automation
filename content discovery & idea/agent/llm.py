@@ -18,12 +18,13 @@ from agent.paths import ENV_FILE
 
 load_dotenv(ENV_FILE, override=True)
 
-FAST = os.getenv("GROQ_FAST_MODEL", "openai/gpt-oss-20b")    # ranking, tweets, query cleanup
-DEEP = os.getenv("GROQ_DEEP_MODEL", "openai/gpt-oss-120b")   # LinkedIn long-form
+FAST = os.getenv("GROQ_FAST_MODEL", "openai/gpt-oss-20b")    # ranking, claim checks
+DEEP = os.getenv("GROQ_DEEP_MODEL", "openai/gpt-oss-120b")   # briefs
 
 
 def chat(model, api_key=None, **opts):
     from langchain_groq import ChatGroq  # lazy: keeps import cost off the non-LLM paths
+    opts.setdefault("max_retries", 4)  # the Groq client backs off on 429/5xx (honouring Retry-After) before giving up
     return ChatGroq(model=model, api_key=api_key or os.getenv("GROQ_API_KEY"), **opts)
 
 
@@ -52,8 +53,8 @@ def ask_json(model, prompt, schema, api_key=None, **opts):
 
     If the request itself is refused (a model without structured outputs, e.g. one set
     through GROQ_FAST_MODEL) or the reply still isn't JSON, fall back to a plain call and
-    dig the object out. Rate limits and outages are not retried here: they propagate, so
-    callers keep control of the retry budget.
+    dig the object out. Rate limits and outages are retried by the client (max_retries in chat()), then
+    propagate.
     """
     fmt = {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema, "strict": True}}
     try:

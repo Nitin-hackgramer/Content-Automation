@@ -143,6 +143,19 @@ def delete_topic_obs(topic_key):
     return bool(_call("DELETE", "topic_obs", {"topic_key": f"eq.{topic_key}"}))
 
 
+KEEP_DAYS = 60  # rows older than this are deleted after each run: trends look back 14 days, the seen filter 14, the app 30
+
+
+def prune(now):
+    """Delete old topic observations, seen-idea rows and run logs, so the free database never fills up. True if all went."""
+    cut = now - timedelta(days=KEEP_DAYS)
+    return all([
+        _call("DELETE", "topic_obs", {"obs_date": f"lt.{cut.date().isoformat()}"}),
+        _call("DELETE", "seen", {"at": f"lt.{cut.isoformat()}", "kind": "eq.idea"}),
+        _call("DELETE", "kv", {"key": "like.discovery_run:*", "at": f"lt.{cut.isoformat()}"}),
+    ])
+
+
 def roundtrip():
     """Live check that persistence really works: write a throwaway row, read it back, delete it, confirm it is gone.
     → [(step, ok, detail)], stopping early only when the store is unusable. The row is kind "selftest" with a

@@ -46,7 +46,8 @@ class Env:
         self.supabase, self.kv = supabase, {}
 
     def __enter__(self):
-        self.saved = (store.save, store.load, saved.LOCAL, jobs.MAX_RUNTIME)
+        self.saved = (store.save, store.load, saved.LOCAL, jobs.MAX_RUNTIME, store.prune)
+        store.prune = lambda now: True  # no network in tests
         self.tmp = tempfile.TemporaryDirectory()
         store.save = lambda k, v: (self.kv.__setitem__(k, json.loads(json.dumps(v))) or True) if self.supabase else False
         store.load = lambda k: self.kv.get(k) if self.supabase else None
@@ -55,7 +56,7 @@ class Env:
         return self
 
     def __exit__(self, *a):
-        store.save, store.load, saved.LOCAL, jobs.MAX_RUNTIME = self.saved
+        store.save, store.load, saved.LOCAL, jobs.MAX_RUNTIME, store.prune = self.saved
         self.tmp.cleanup()
         jobs.reset()
 
@@ -99,6 +100,52 @@ def check_a_stuck_job_is_abandoned_and_its_late_result_dropped():
         gate.set()
         time.sleep(0.2)
         assert stuck.state == "failed" and stuck.result is None and notified == [], "the late result changes nothing and notifies no one"
+
+
+def check_status_reports_a_stuck_job_as_failed():
+    with Env():
+        jobs.MAX_RUNTIME = 0.05
+        gate = threading.Event()
+        jobs.start("discover", "discover", "stuck", lambda: gate.wait(5))
+        time.sleep(0.1)
+        s = jobs.info(jobs.latest("discover"))
+        gate.set()
+        assert s["state"] == "failed" and s["error"] == "TimedOut", "a poller never waits forever"
+
+
+def check_prune_deletes_only_old_rows():
+    calls = []
+    real = store._call
+    store._call = lambda method, table, params=None, body=None, prefer=None: calls.append((method, table, params)) or True
+    try:
+        assert store.prune(NOW)
+    finally:
+        store._call = real
+    assert all(m == "DELETE" for m, _, _ in calls) and len(calls) == 3, calls
+    by = {t: p for _, t, p in calls}
+    assert by["topic_obs"] == {"obs_date": "lt.2026-08-26"}
+    assert by["seen"] == {"at": "lt.2026-08-26T12:00:00+00:00", "kind": "eq.idea"}
+    assert by["kv"] == {"key": "like.discovery_run:*", "at": "lt.2026-08-26T12:00:00+00:00"}
+
+
+def check_idea_schema_is_frozen():
+    """The contract the web app (app/src/lib/types.ts Idea) and the Asset system read. Changing a key = bump SCHEMA_VERSION
+    and update types.ts in the same commit; this test fails until both are done."""
+    keys = {"id", "rank", "run_id", "saved_at", "title", "summary", "url", "score", "format", "hook", "hook_audit", "reason",
+            "evidence_level", "claim_status", "needs_verification", "independent_sources", "penalties", "warnings", "scored_by",
+            "published", "trend", "evidence", "brief", "brief_at"}
+    r = saved.record(idea(1), 1, "run1", NOW)
+    assert set(r) == keys and saved.SCHEMA_VERSION == 1, sorted(set(r) ^ keys)
+    assert set(r["evidence"][0]) == {"source", "platform", "author", "url", "title", "published", "metrics"}
+    assert set(r["trend"]) == {"class", "explanation", "topic_key"}
+    ts = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "app", "src", "lib", "types.ts"), encoding="utf-8").read()         if os.path.exists(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "app", "src", "lib", "types.ts")) else None
+    if ts:  # the app sits next to the pipeline in this workspace: check the TypeScript side names the same keys
+        body = ts.split("export type Idea = {", 1)[1].split("};", 1)[0]
+        assert all(f" {k}" in body or f"{{ {k}" in body or body.lstrip().startswith(k) for k in keys), [k for k in keys if k not in body]
+        assert "IDEA_SCHEMA_VERSION = 1" in ts
+    with Env() as env:
+        saved.save_run([idea(1)], "run1", NOW)
+        assert env.kv["discovery_ideas"]["schema"] == 1
 
 
 # ---- saved ideas -------------------------------------------------------------------------------------------------
@@ -188,9 +235,11 @@ def check_discover_saves_what_it_shows_and_survives_a_restart():
                 "failed_sources": {"web:q": "error:RATE_LIMITED"}, "items": 100, "candidates": 80, "after_seen_filter": 60,
                 "already_seen": {"same_url": 20, "same_story": 0}, "seen_filter": {"message": "Seen-filter: SUPABASE"},
                 "trends": {"message": "Trends: SUPABASE", "counts": {"new": 0}}, "note": ""}
-    with Env():
-        real = service.run.run
+    pruned = []
+    with Env() as env:
+        real = service.run.run, service.store.prune
         service.run.run = fake_run
+        service.store.prune = lambda now: pruned.append(now)
         try:
             done = threading.Event()
             job, started = service.start_discover(99, on_done=lambda j: done.set())
@@ -198,6 +247,10 @@ def check_discover_saves_what_it_shows_and_survives_a_restart():
             assert ran == [(service.MAX_TOP, 0)], "top is clamped and no briefs are written for every idea"
             r = job.result
             assert r["saved_where"] == "supabase" and r["complete"] is False and r["failed_sources"] == {"web:q": "error:RATE_LIMITED"}
+            log = env.kv["discovery_run:2026-10-25T12:00:00+00:00"]  # the web app's History and Sources pages read this
+            assert log["generated_at"] == "2026-10-25T12:00:00+00:00" and log["failed_sources"] == r["failed_sources"] and log["items"] == 100
+            assert log["ideas"] == [{"id": idea(n)["id"], "title": idea(n)["title"], "score": idea(n)["score"]} for n in (1, 2)]
+            assert "briefs" not in log and pruned, "old rows are pruned after a run"
             summary, ideas = service.last_run()
             assert summary is r and [i["id"] for i in ideas] == [idea(1)["id"], idea(2)["id"]]
             jobs.reset()  # a restart: the job is forgotten, the ideas are not
@@ -207,7 +260,7 @@ def check_discover_saves_what_it_shows_and_survives_a_restart():
             time.sleep(0.2)
             assert ran[-1][0] == 1, "top below 1 becomes 1"
         finally:
-            service.run.run = real
+            service.run.run, service.store.prune = real
 
 
 def check_briefs_are_fetched_or_written_once():
@@ -250,6 +303,9 @@ def check_briefs_are_fetched_or_written_once():
 
 if __name__ == "__main__":
     check_jobs()
+    check_idea_schema_is_frozen()
+    check_status_reports_a_stuck_job_as_failed()
+    check_prune_deletes_only_old_rows()
     check_a_stuck_job_is_abandoned_and_its_late_result_dropped()
     check_saved_records_and_ordering()
     check_saved_find()

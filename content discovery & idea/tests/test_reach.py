@@ -148,6 +148,17 @@ def check_failures():
             return e.reach_code
     assert with_cli(not_installed) == "NOT_INSTALLED"
 
+    def jobs_without_cli():  # a host without Agent Reach (Render): one honest report line, not one error per query
+        reach.CLI = None
+        return reach.jobs(NOW)
+    got = with_cli(jobs_without_cli)
+    assert [name for name, _ in got] == ["agent-reach"], got
+    try:
+        got[0][1]()
+        raise AssertionError("expected NOT_INSTALLED")
+    except reach.ReachError as e:
+        assert e.reach_code == "NOT_INSTALLED"
+
 def check_x_reliability():
     """Retries, backoff, budget, per-query status, and failures that stay local to their query."""
     tweet_ok = ok([TWEET])

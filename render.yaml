@@ -1,0 +1,26 @@
+# Render Blueprint: the discovery pipeline as one free web service (FastAPI, ONE worker: job state lives in the process).
+# Render sets RENDER_EXTERNAL_URL itself (the Telegram webhook uses it) and gives HTTPS at https://<name>.onrender.com. Secrets are entered in the dashboard (sync: false), never here.
+services:
+  - type: web
+    name: content-discovery
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r "content discovery & idea/requirements.txt"
+    startCommand: cd "content discovery & idea" && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TRIGGER_SECRET
+        sync: false
+      - key: TELEGRAM_BOT
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false

@@ -1,64 +1,38 @@
-import hmac
-import os
+"""The pipeline as a small HTTP service: Telegram webhook plus the API the web app calls.
+
+Every route except `/` needs TRIGGER_SECRET (at least 32 characters). Unset or short = closed, never open.
+State of running jobs lives in this one process (agent/discovery/jobs.py), so run ONE worker:
+    uvicorn main:app --host 127.0.0.1 --port 8000
+"""
+
+import re
 import sys
-import threading
 
 from fastapi import FastAPI, Header, HTTPException
 
-from agent import news, telegram_discovery
-from agent.graph import graph
-from agent.nodes import approval
-from agent.nodes.generate import generate_node
+from agent import telegram_discovery
+from agent.discovery import jobs, service
 
-# Windows console defaults to cp1252; tweets/titles carry unicode → force UTF-8 so prints don't crash
+# Windows console defaults to cp1252; titles carry unicode → force UTF-8 so prints don't crash
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-INITIAL_STATE = {
-    "target": "both",
-    "research_data": [],
-    "selected_item": None,
-    "angle": None,
-    "selected_draft": None,
-    "linkedin_draft": None,
-    "selected_image": None,
-    "approval_status": "pending",
-    "rejection_feedback": None,
-    "retry_count": 0,
-}
+ID = re.compile(r"^[a-f0-9]{8,64}$", re.I)  # idea ids; the same rule the web app applies
+KINDS = ("discover", "brief")
 
-
-def run_agent(target="both", item=None, angle=None):
-    state = dict(INITIAL_STATE)
-    state["target"] = target
-    if item:
-        # /repurpose: the item is already chosen, so skip research+select and go straight
-        # to drafting. ponytail: outside the graph, so a rejection here ends the run
-        # instead of re-researching. Route it through the graph if that's ever wanted.
-        state.update(research_data=[item], selected_item=item, angle=angle)
-        final_state = approval.approval_node(generate_node(state))
-    else:
-        final_state = graph.compile().invoke(state)
-    print(f"\nDone. status={final_state['approval_status']}")
-    return final_state
-
-
-def _start_run(target="both", item=None, angle=None):
-    # graph.invoke blocks up to ~2h on Telegram approval → run detached so the
-    # triggering HTTP request (cron hit or webhook) returns immediately.
-    threading.Thread(target=run_agent, args=(target, item, angle), daemon=True).start()
-
-
-# ASGI app so Render binds $PORT. schtasks is Windows-only and dead on Render;
-# schedule by hitting /run from a cron (Hostinger/cron-job.org), one per target/time.
 app = FastAPI()
 
 
 @app.on_event("startup")
 def _startup():
-    # register the Telegram webhook so /help, /latest, /generate, /x, /li work
-    # anytime, not just while a draft is pending. No-op if no bot token is set.
-    approval.ensure_webhook()
+    if not telegram_discovery.trigger_secret():
+        print(f"TRIGGER_SECRET is missing or shorter than {telegram_discovery.MIN_SECRET} characters: every route except / is closed.", flush=True)
+    telegram_discovery.ensure_webhook()
+
+
+def guard(secret):
+    if not telegram_discovery.secret_ok(secret):
+        raise HTTPException(status_code=403, detail="bad key")
 
 
 @app.get("/")
@@ -66,39 +40,44 @@ def health():
     return {"ok": True}
 
 
-@app.api_route("/run", methods=["GET", "POST"])
-def trigger(target: str = "both"):
-    if target not in ("x", "li", "both"):
-        target = "both"
-    _start_run(target)
-    return {"started": True, "target": target}
+@app.post("/discover", status_code=202)
+def discover(top: int = service.DEFAULT_TOP, x_trigger_secret: str = Header("")):
+    guard(x_trigger_secret)
+    service.start_discover(top, on_done=lambda job: telegram_discovery.notify_discover(job))  # cron runs report to Telegram
+    return jobs.info(jobs.latest("discover"))
 
 
-@app.api_route("/news", methods=["GET", "POST"])
-def news_trigger(key: str = "", x_trigger_secret: str = Header("")):
-    # Unlike /run this is guarded: an open URL would let anyone spam the chat and burn
-    # the Groq quota. No TRIGGER_SECRET configured = closed, not open.
-    # Prefer the X-Trigger-Secret header: a ?key= in the URL ends up in access logs.
-    # ponytail: no once-a-day guard, a double cron fire sends two digests.
-    secret = os.getenv("TRIGGER_SECRET") or ""
-    given = x_trigger_secret or key
-    if not secret or not hmac.compare_digest(given.encode(), secret.encode()):
-        raise HTTPException(status_code=403, detail="bad key")
-    threading.Thread(target=news.run, daemon=True).start()  # fetch+filter+send takes ~40s; don't hold the cron
-    return {"started": True}
+@app.post("/brief", status_code=202)
+def brief(body: dict, x_trigger_secret: str = Header("")):
+    guard(x_trigger_secret)
+    idea_id = body.get("id") if isinstance(body, dict) else None
+    if not isinstance(idea_id, str) or not ID.match(idea_id):
+        raise HTTPException(status_code=400, detail="bad id")
+    status, idea = service.find_idea(idea_id)
+    if status != "ok":
+        raise HTTPException(status_code=404, detail="idea is not saved")
+    service.start_brief(idea, force=True)
+    return jobs.info(jobs.latest("brief"))
+
+
+@app.get("/jobs")
+def job_log(x_trigger_secret: str = Header("")):
+    guard(x_trigger_secret)
+    return jobs.recent()
+
+
+@app.get("/jobs/{kind}")
+def job_status(kind: str, x_trigger_secret: str = Header("")):
+    guard(x_trigger_secret)
+    if kind not in KINDS:
+        raise HTTPException(status_code=404)
+    return jobs.info(jobs.latest(kind))
 
 
 @app.post("/telegram-webhook")
 def telegram_webhook(update: dict, x_telegram_bot_api_secret_token: str = Header("")):
-    # only reachable when no run is active (approval.py deletes the webhook while polling).
     # Sync on purpose: handlers make blocking HTTP/LLM calls, so FastAPI runs this in its threadpool.
-    if not approval.webhook_authorized(x_telegram_bot_api_secret_token):
+    if not telegram_discovery.webhook_authorized(x_telegram_bot_api_secret_token):
         raise HTTPException(status_code=403, detail="bad secret token")
-    # /discover /trending /ideas /brief and their buttons go to the discovery front end; everything else is unchanged
-    if not telegram_discovery.handle_update(update):
-        approval.handle_idle_update(update, _start_run)
+    telegram_discovery.handle_update(update)  # anything that is not a discovery command is ignored
     return {"ok": True}
-
-
-if __name__ == "__main__":
-    run_agent()

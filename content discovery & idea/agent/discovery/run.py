@@ -33,7 +33,7 @@ def run(top=10, briefs=0, now=None):
     known, seen_state = seen.load(SEEN_DAYS, now)
     fresh, repeats = seen.filter(candidates, known)
     ranked, note = rank.rank(fresh, now, api_key)
-    shown = ranked[:top]
+    shown = rank.diversify(ranked, top)  # one lone source (a changelog) cannot fill the list
     for idea in shown:
         idea["trend"] = trend_info.get(idea["id"])  # classification and the evidence behind it; ranking is not changed by it
     if api_key:

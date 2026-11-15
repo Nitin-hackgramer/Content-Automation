@@ -364,6 +364,10 @@ def jobs(now):
     _limited.clear()
     _web_state["ended"] = None
     _x_state["exhausted"] = 0
+    if not CLI:  # e.g. on Render: one report line for the whole channel set, not one error per query
+        def missing():
+            raise ReachError("NOT_INSTALLED")
+        return [("agent-reach", missing)]
     return ([(f"x:{q}", lambda q=q: _fetch_x(q, now)) for q in TWITTER_QUERIES]
             + [(f"youtube:{q}", lambda q=q: _fetch_youtube(q)) for q in YOUTUBE_QUERIES]
             + [(f"youtube-channel:{h}", lambda h=h: _fetch_channel(h)) for h in YOUTUBE_CHANNELS]

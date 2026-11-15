@@ -551,29 +551,27 @@ def check_local_polling_and_setup_helper():
         assert "webhook may be set" in out.getvalue() and TOKEN not in out.getvalue()
 
 
-def check_the_webhook_route_sends_ours_to_discovery_and_the_rest_to_the_old_handler():
+def check_the_webhook_route_sends_ours_to_discovery_and_ignores_the_rest():
     from fastapi.testclient import TestClient
 
     import main
     with Bot() as bot:
         bot.seed(1)
-        os.environ["TRIGGER_SECRET"] = "route-secret"
-        header = {"X-Telegram-Bot-Api-Secret-Token": hashlib.sha256(b"route-secret").hexdigest()}
-        passed_on = []
-        real = main.approval.handle_idle_update
-        main.approval.handle_idle_update = lambda update, trigger: passed_on.append(update)
-        try:
-            client = TestClient(main.app)
-            r = client.post("/telegram-webhook", json=msg("/ideas"), headers=header)
-            assert r.status_code == 200 and passed_on == [] and "Idea number 1" in bot.tg.texts()[0], "ours: handled here, not passed on"
-            r = client.post("/telegram-webhook", json=msg("/help"), headers=header)
-            assert r.status_code == 200 and len(passed_on) == 1, "not ours: the existing handler gets it unchanged"
-            r = client.post("/telegram-webhook", json=msg("/discover", STRANGER), headers=header)
-            assert r.status_code == 200 and len(passed_on) == 1 and not jobs.running(), "a stranger's command goes nowhere"
-            assert client.post("/telegram-webhook", json=msg("/ideas"), headers={}).status_code == 403
-            assert client.post("/telegram-webhook", json=msg("/ideas"), headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"}).status_code == 403
-        finally:
-            main.approval.handle_idle_update = real
+        os.environ["TRIGGER_SECRET"] = "route-secret-" + "x" * 32
+        header = {"X-Telegram-Bot-Api-Secret-Token": hashlib.sha256(os.environ["TRIGGER_SECRET"].encode()).hexdigest()}
+        client = TestClient(main.app)
+        r = client.post("/telegram-webhook", json=msg("/ideas"), headers=header)
+        assert r.status_code == 200 and "Idea number 1" in bot.tg.texts()[0], "ours: handled here"
+        sent = len(bot.tg.texts())
+        r = client.post("/telegram-webhook", json=msg("/help"), headers=header)
+        assert r.status_code == 200 and len(bot.tg.texts()) == sent, "not ours: ignored, nothing sent"
+        r = client.post("/telegram-webhook", json=msg("/discover", STRANGER), headers=header)
+        assert r.status_code == 200 and not jobs.running(), "a stranger's command goes nowhere"
+        assert client.post("/telegram-webhook", json=msg("/ideas"), headers={}).status_code == 403
+        assert client.post("/telegram-webhook", json=msg("/ideas"), headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"}).status_code == 403
+        os.environ["TRIGGER_SECRET"] = "short"  # a weak secret closes the route even for a matching header
+        weak = {"X-Telegram-Bot-Api-Secret-Token": hashlib.sha256(b"short").hexdigest()}
+        assert client.post("/telegram-webhook", json=msg("/ideas"), headers=weak).status_code == 403
 
 
 if __name__ == "__main__":
@@ -600,7 +598,7 @@ if __name__ == "__main__":
     check_brief_edge_cases()
     check_a_long_brief_is_split_into_parts()
     check_local_polling_and_setup_helper()
-    check_the_webhook_route_sends_ours_to_discovery_and_the_rest_to_the_old_handler()
+    check_the_webhook_route_sends_ours_to_discovery_and_ignores_the_rest()
     socket.socket.connect = real_connect
     assert not attempts, f"the tests tried to reach the network: {attempts}"
     print("telegram tests passed")

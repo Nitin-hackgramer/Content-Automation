@@ -1,9 +1,7 @@
 # Content Discovery Agent
 
-Independent copy of the Agent P news/posting codebase, prepared for content discovery. It has its own
-Telegram bot, Supabase project and Groq key. It does not post to X or LinkedIn. The content
-discovery workflow is not built yet; what runs today is the inherited research, draft, and
-approval pipeline.
+Finds current AI and developer stories, ranks them as short-video ideas, and writes briefs. Own Telegram bot,
+Supabase project and Groq key. It posts nothing. Served by `main.py` (FastAPI) for the web app and Telegram.
 
 ## Setup
 
@@ -45,42 +43,47 @@ Only this folder's `.env` is read (`agent/paths.py`). Variables already set in t
 |---|---|---|
 | `TELEGRAM_BOT` | for Telegram | bot token: approvals, digest |
 | `TELEGRAM_CHAT_ID` | for Telegram | the one chat allowed to drive the bot |
-| `TRIGGER_SECRET` | **required before any deployment** | guards `/news` (header `X-Trigger-Secret` or `?key=`) and the Telegram webhook. If unset, the webhook accepts any POST, so an unset value is not safe on a public URL |
+| `TRIGGER_SECRET` | **required before any deployment** | at least 32 characters. Guards every route except `/`, including the Telegram webhook. Unset or short = closed |
 | `GROQ_API_KEY` | for LLM steps | ranking, drafts, editor. Without it, plain fallbacks run |
 | `SUPABASE_URL`, `SUPABASE_SECRET_KEY` | for memory | tables are prefixed `discovery_`. Without them, local files are used |
 | `RENDER_EXTERNAL_URL` | deployment only | Telegram webhook base URL |
 
 ## Test locally (no deploy, no recurring jobs)
 
-Offline self-checks (Telegram and Supabase stubbed):
+Offline tests: `.venv\Scripts\python -m tests.test_api` (and the others listed under Content discovery).
+Live Groq check: `.venv\Scripts\python -m agent.llm`.
+
+## Run the service (web app + Telegram webhook)
+
+`TRIGGER_SECRET` must be at least 32 characters, or every route except `/` answers 403:
 
 ```
-.venv\Scripts\python -m agent.store
-.venv\Scripts\python -m agent.nodes.select
-.venv\Scripts\python -m agent.nodes.generate
-.venv\Scripts\python -m agent.nodes.approval
+python -c "import secrets; print(secrets.token_hex(32))"
+.venv\Scripts\python -m uvicorn main:app --host 127.0.0.1 --port 8000     # ONE worker: job state lives in this process
 ```
 
-Live checks (read public feeds and Groq; use the real keys):
+Routes (header `X-Trigger-Secret`): `POST /discover`, `POST /brief {"id"}`, `GET /jobs/{discover|brief}`, `GET /jobs`.
+The web app calls these (`PIPELINE_URL` and `TRIGGER_SECRET` in `app/.env.local`).
 
-```
-.venv\Scripts\python -m agent.nodes.research
-.venv\Scripts\python -m agent.llm            # confirms the Groq model ids on this key
-.venv\Scripts\python -m agent.news           # prints usage
-.venv\Scripts\python -m agent.news --send    # builds a real digest and sends it to TELEGRAM_BOT
-```
+## Deploy (Render free web service + Hostinger cron)
 
-Import check for the app (starts nothing):
+1. Push this repo to GitHub. On Render: New > Blueprint > pick the repo; it reads `render.yaml` at the repo root.
+2. Fill the env vars Render asks for: `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `GROQ_API_KEY`, `TRIGGER_SECRET` (same 64-char value
+   as the web app), `TELEGRAM_BOT`, `TELEGRAM_CHAT_ID`. Render sets `RENDER_EXTERNAL_URL` itself; on boot the service registers the
+   Telegram webhook with it, so the local `python -m agent.telegram_discovery` poller then refuses to start (no second writer).
+3. Check: `https://<service>.onrender.com/` answers `{"ok":true}`.
+4. Web app: `PIPELINE_URL=https://<service>.onrender.com` and the same `TRIGGER_SECRET`.
+5. Hostinger cron (hPanel > Advanced > Cron Jobs, server time UTC), twice a day, 12 hours apart (06:00 and 18:00 IST):
+   `30 0,12 * * *`
+   ```
+   curl -s -m 90 -o /dev/null https://<service>.onrender.com/ ; curl -fsS -m 60 -o /dev/null -X POST -H "X-Trigger-Secret: <TRIGGER_SECRET>" https://<service>.onrender.com/discover
+   ```
+   The first call wakes the free instance (it sleeps after 15 idle minutes); the second starts a run. Results and failures are
+   sent to Telegram, and land in the app.
 
-```
-.venv\Scripts\python -c "import main; print('ok')"
-```
-
-Run the server only for manual checks. Startup registers no webhook unless `RENDER_EXTERNAL_URL` is set:
-
-```
-.venv\Scripts\python -m uvicorn main:app --port 8000
-```
+Free-plan limits: the disk is wiped on every restart, so Supabase must work (local fallback files do not survive). Agent Reach
+(X, YouTube, web search) is not installed on Render: those sources show as one `agent-reach: NOT_INSTALLED` line per run.
+Old rows (over 60 days) are pruned after each run. `python scripts/backup.py` downloads all tables to `data/backups/`.
 
 ## Content discovery
 
@@ -98,6 +101,7 @@ and optionally writes a short-video brief for each chosen idea. It posts nothing
 .venv\Scripts\python -m tests.test_trends                    # offline trend tests, incl. an 8-day simulation (fake PostgREST)
 .venv\Scripts\python -m tests.test_web_limits                # offline web rate-limit, spacing and cache tests
 .venv\Scripts\python -m tests.test_service                   # offline jobs, saved ideas and service tests
+python run_tests.py                                           # every test file above, one command (CI runs this)
 .venv\Scripts\python -m tests.test_telegram                  # offline Telegram front-end tests (fake Telegram, network blocked)
 ```
 
@@ -206,7 +210,5 @@ Honest limits:
 
 ## Not included
 
-- `scripts/optimize_linkedin.py` needs `dspy`, a dev-only dependency that is not in `requirements.txt`.
-- `scripts/scheduler_setup.py` would create Windows tasks prefixed `DiscoveryAgent_`. Its default times
-  are Agent P's posting slots. Do not run `install` until the discovery schedule exists.
-- Posting to X or LinkedIn was removed on purpose (`agent/publish.py` deleted).
+- Scheduling: nothing is scheduled yet (the old Agent P scheduler script was removed).
+- Posting to X or LinkedIn was removed on purpose (the old Agent P drafting, approval and digest code is deleted).

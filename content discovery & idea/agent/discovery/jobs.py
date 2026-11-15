@@ -33,6 +33,7 @@ class Job:
         self.started_at = datetime.now(timezone.utc)
         self._t0 = time.monotonic()
         self._t1 = None
+        self.ended_at = None
 
     def elapsed(self):
         """Seconds so far (running) or in total (finished)."""
@@ -41,6 +42,7 @@ class Job:
 
 def _finish(job, state, error=None, result=None):
     job.state, job.error, job.result, job._t1 = state, error, result, time.monotonic()
+    job.ended_at = datetime.now(timezone.utc)
 
 
 def start(kind, key, label, fn, on_done=None):
@@ -74,6 +76,28 @@ def start(kind, key, label, fn, on_done=None):
 
     threading.Thread(target=work, daemon=True, name=f"job-{job.id}").start()
     return job, True
+
+
+def info(job):
+    """A job as the web app's status line: {state: idle|running|done|failed, startedAt, endedAt, error}, times in epoch ms."""
+    if job is None:
+        return {"state": "idle"}
+    with _lock:
+        if job.state == "running" and job.elapsed() > MAX_RUNTIME:
+            _finish(job, "failed", "TimedOut")  # same rule as start(): abandoned, its late result is dropped
+    out = {"state": job.state, "startedAt": int(job.started_at.timestamp() * 1000)}
+    if job.ended_at:
+        out["endedAt"] = int(job.ended_at.timestamp() * 1000)
+    if job.error:
+        out["error"] = job.error
+    return out
+
+
+def recent(kinds=("discover", "brief")):
+    """→ finished jobs, newest first, as {kind, startedAt, endedAt, ok, error?}."""
+    with _lock:
+        done = [j for j in reversed(_jobs) if j.state in ("done", "failed") and j.kind in kinds]
+    return [{"kind": j.kind, "ok": j.state == "done", **{k: v for k, v in info(j).items() if k != "state"}} for j in done]
 
 
 def running(kind=None):

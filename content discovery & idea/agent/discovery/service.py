@@ -11,6 +11,7 @@ these and decides how to show the answers; discovery, ranking and trend logic st
 import os
 from datetime import datetime, timezone
 
+from agent import store
 from agent.discovery import jobs, run, saved, scripts, trends
 
 DEFAULT_TOP, MAX_TOP = 10, 15
@@ -46,6 +47,13 @@ def _discover(top):
     now = datetime.now(timezone.utc)
     result = run.run(top=top, briefs=0, now=now)  # briefs are written on request, not for every idea
     where = saved.save_run(result["ideas"], result["generated_at"], now)
+    # The run log, for the web app's History and Sources pages (the JSON on disk is lost on a Render restart).
+    log = {k: result.get(k) for k in ("generated_at", "sources", "complete", "failed_sources", "items", "candidates",
+                                      "after_seen_filter", "already_seen", "note")}
+    log["trends"] = {"counts": (result.get("trends") or {}).get("counts") or {}}
+    log["ideas"] = [{"id": i["id"], "title": i.get("title"), "score": i.get("score")} for i in result["ideas"]]
+    store.save(f"discovery_run:{result['generated_at']}", log)
+    store.prune(now)
     return {"run_id": result["generated_at"], "ideas": [i["id"] for i in result["ideas"]], "saved_where": where,
             "complete": result["complete"], "failed_sources": result["failed_sources"], "items": result["items"],
             "candidates": result["candidates"], "after_seen_filter": result["after_seen_filter"],

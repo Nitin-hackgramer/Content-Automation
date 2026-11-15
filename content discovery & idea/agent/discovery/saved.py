@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 from agent import store
 from agent.paths import DATA
 
+# FROZEN contract, read by the web app (app/src/lib/types.ts) and the Asset system. Change a key in record() =
+# bump this and update types.ts together; tests/test_service.check_idea_schema_is_frozen holds both sides.
+SCHEMA_VERSION = 1
 KV_KEY = "discovery_ideas"
 LOCAL = os.path.join(DATA, "discovery", "saved_ideas.json")
 MAX_SAVED = 40
@@ -65,7 +68,7 @@ def _read():
 
 def _write(records):
     """→ "supabase", "local" (the explicit fallback) or "none" (could not be saved anywhere)."""
-    value = {"ideas": records[:MAX_SAVED], "at": datetime.now(timezone.utc).isoformat()}
+    value = {"schema": SCHEMA_VERSION, "ideas": records[:MAX_SAVED], "at": datetime.now(timezone.utc).isoformat()}
     if store.save(KV_KEY, value):
         return "supabase"
     try:

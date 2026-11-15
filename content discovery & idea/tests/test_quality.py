@@ -267,7 +267,23 @@ def check_model_decides_whether_a_claim_is_news():
     assert "asserts_company_news" in rank.RANK_SCHEMA["properties"]["ideas"]["items"]["required"]
 
 
+def check_one_source_cannot_fill_the_list():
+    r = [{"id": str(n), "score": 90 - n, "sources": ["GitHub changelog"]} for n in range(6)] +         [{"id": "x", "score": 40, "sources": ["HackerNews"]}, {"id": "y", "score": 30, "sources": ["HackerNews", "X"]}]
+    got = [i["id"] for i in rank.diversify(r, 5)]
+    assert got == ["0", "1", "2", "x", "y"], got
+    assert [i["id"] for i in rank.diversify(r[:4], 4)] == ["0", "1", "2", "3"], "a short pool is filled back rather than left short"
+
+
+def check_long_titles_are_cut_on_a_word():
+    from agent.discovery import sources
+    t = sources._item("word " * 60, "https://x", "X")["title"]
+    assert len(t) <= 200 and t.endswith("…") and t[:-1].endswith("word"), t
+    assert sources._item("short  title", "https://x", "X")["title"] == "short title"
+
+
 if __name__ == "__main__":
+    check_one_source_cannot_fill_the_list()
+    check_long_titles_are_cut_on_a_word()
     check_claim_structure()
     check_model_decides_whether_a_claim_is_news()
     check_claim_status()
